@@ -103,7 +103,7 @@ def mping_frequency(infile):
 
 def convert_MAP(infile):
     rils = []
-    data = defaultdict(lambda : defaultdict(lambda: defaultdict(lambda: int)))
+    data = defaultdict(lambda : defaultdict(lambda: defaultdict(lambda: str)))
     with open (infile, 'r') as filehd:
         for line in filehd:
             line = line.rstrip()
@@ -122,6 +122,9 @@ def convert_MAP(infile):
                 unit[0] = 'Position'
                 #print unit[0], unit[1], unit[2]
                 rils.extend(unit)
+   
+    #for t in sorted(data['GN204']['Chr10'].keys(), key=int):
+    #    print t
     return data
 
 def binarySearch(data, val):
@@ -148,22 +151,25 @@ def binarySearch(data, val):
     return sorted([highIndex, lowIndex])
  
 
-def findbin(start, binmap, ril, chrs, transition):
-    #for i in sorted(binmap[ril][chrs].keys(), key=int):
-    #    print i
+def findbin(start, binmap, ril, chrs):
+    
     array = []
     array.extend(sorted(binmap[ril][chrs].keys(), key=int))
-    #for i in array:
-        #print i
+    #mping after last bin on chromosome, return 0 mean genotype unknown
     if int(start) > int(array[-1]):
         return 0
     index = binarySearch(array, int(start))
-    #print 'BINsearch', len(array), start, index[0], index[1], array[index[0]], array[index[1]],binmap[ril][chrs][array[index[1]]]
-    if transition[ril][chrs].has_key(array[index[1]]):
-        return 0
+    #bin overlap with mping is a transition bin on recombination block, which mean genotype may not be precise, return 0
+    #if transition[ril][chrs].has_key(array[index[1]]):
+    #    return 0
+    #return the bin that overlap with mping
+    #if int(start) == 6566243 and ril == 'GN204':
+    #    for t in sorted(binmap[ril][chrs].keys(), key=int):
+    #        print t
+    #print start, array[index[0]], array[index[1]]
     return array[index[1]]
 
-def genotyping(ril, mping, binmap, transition):
+def genotyping(ril, mping, binmap):
     ril = 'GN%s' %(ril)
     p = re.compile(r'(\w+):(\d+)\-(\d+)')
     m = p.search(mping)
@@ -175,9 +181,15 @@ def genotyping(ril, mping, binmap, transition):
         start = m.groups(0)[1]
         end   = m.groups(0)[2]
     #print ril, chrs, start, len(binmap[ril][chrs].keys())
-    pos = findbin(start, binmap, ril, chrs, transition)
-    #print ril,chrs,start,pos
-    genotype = binmap[ril][chrs][pos] if pos > 0 else '3'
+    pos = findbin(start, binmap, ril, chrs)
+    #print 'find bin', ril, chrs, start, pos
+    #pos is 0 when genotype of bin that overlap with mping is unknown
+    #we should use raw bin not filled or uniq bin here and check if the genotype is NA.
+    #genotype = binmap[ril][chrs][pos] if pos > 0 else '3'
+    if pos > 0 and binmap[ril][chrs][pos] != 'NA':
+        genotype = binmap[ril][chrs][pos]
+    else:
+        genotype = '3'
     return genotype
 
 def validmap(binmap):
@@ -204,76 +216,107 @@ def bamcheck(bam, mping):
     print >> ofile, cmd
     out = subprocess.check_output(cmd, shell=True)
     lines = re.split(r'\n', out)
+    total = 0
     covered = 0
-    clipped  = 0
+    clipped = 0
+    footprint = 0
+    flag = 0 # flag indicate there are indel and softclips in the reads, probably solfclip only, supports for mping insertion
     if len(lines) < 2:
         return 2
     pattern = re.compile(r'([0-9]+)([A-Z]+)')
-
     for line in lines:
         print >> ofile, line
+        total += 1
         unit = re.split(r'\t', line)
         if len(unit) < 2:
             continue
         matches = []
+        indel = 0
+        soft  = 0
         for (base, match) in re.findall(pattern, unit[5]):
             if match == 'I' or match == 'D':
+                indel += 1
                 continue
+            elif match == 'S' and int(base) > 10:
+                soft += 1
+                matches.append([base, match])
+            else:
             #print >> ofile, base, match
-            matches.append([base, match])
+                matches.append([base, match])
             #print >> ofile, matches[0]
         #print >> ofile, len(matches)
+        if indel > 0 and soft > 0:
+            flag += 1
+        elif indel > 0:
+            footprint += 1
         if len(matches) == 1 and matches[0][1] == 'M': # perfect match
             if int(unit[3]) < start - 10 and int(unit[3]) + int(matches[0][0]) > end + 10: # read cover mping insertion site
                 covered += 1
         elif len(matches) == 2: # may have soft clip
             if matches[0][1] == 'S' and int(matches[0][0]) > 10 and matches[1][1] == 'M' and int(matches[1][0]) > 10: # clip at start
-                if int(unit[3]) > start - 5 and int(unit[3]) < end + 5: # read at mping insertion site, so the clip should be due to mping insertion
+                if int(unit[3]) > start - 15 and int(unit[3]) < end + 15: # read at mping insertion site, so the clip should be due to mping insertion
                     covered += 1
                     clipped += 1
-                elif int(unit[3]) <= start - 5 and int(unit[3]) + int(matches[1][0]) >= end + 5: # read cover mping insertion site
+                elif int(unit[3]) <= start - 15 and int(unit[3]) + int(matches[1][0]) >= end + 15: # read cover mping insertion site
                     covered += 1
             elif matches[1][1] == 'S' and int(matches[1][0]) > 10 and matches[0][1] == 'M' and int(matches[0][0]) > 10: # clip at end
-                if int(unit[3]) + int(matches[0][0]) > start - 5 and int(unit[3]) + int(matches[0][0]) < end + 5: # read at mping insertion site, so the clip should be due to mping insertion
+                if int(unit[3]) + int(matches[0][0]) > start - 15 and int(unit[3]) + int(matches[0][0]) < end + 15: # read at mping insertion site, so the clip should be due to mping insertion
                     covered += 1
                     clipped += 1
-                elif int(unit[3]) <= start - 5 and int(unit[3]) + int(matches[0][0]) >= end + 5: # read cover mping insertion site
+                elif int(unit[3]) <= start - 15 and int(unit[3]) + int(matches[0][0]) >= end + 15: # read cover mping insertion site
                     covered += 1
         elif len(matches) == 3 and matches[0][1] == 'S' and matches[1][1] == 'M' and matches[2][1] == 'S': # may have soft clip, but the other end of reads have clip too
-            if int(unit[3]) > start - 5 and int(unit[3]) < end + 5 and int(matches[0][0]) > 10: # read at mping insertion site, so the clip should be on the left if due to mping
+            if int(unit[3]) > start - 15 and int(unit[3]) < end + 15 and int(matches[0][0]) > 10: # read at mping insertion site, so the clip should be on the left if due to mping
                 covered += 1
                 clipped += 1
-            elif int(unit[3]) + int(matches[1][0]) > start - 5 and int(unit[3]) + int(matches[1][0]) < end + 5: # read start before mping insertion site, but clipped at mping
+            elif int(unit[3]) + int(matches[1][0]) > start - 15 and int(unit[3]) + int(matches[1][0]) < end + 15: # read start before mping insertion site, but clipped at mping
                 covered += 1
                 clipped += 1
-            elif int(unit[3]) <= start - 5 and int(unit[3]) + int(matches[1][0]) >= end + 5: # read cover the mping insertion site
+            elif int(unit[3]) <= start - 15 and int(unit[3]) + int(matches[1][0]) >= end + 15: # read cover the mping insertion site
                 covered += 1
         print >> ofile, covered, clipped
     print >> ofile, covered, clipped
-    rate = float(clipped/covered) if covered > 0 else 0
-    if rate > 0.2:
-        return 1
+    print >> ofile, total, footprint, flag, float(float(footprint)/total)
+    rate = float(float(clipped)/covered) if covered > 0 else 0
+    if total <= 2:
+        print >> ofile, 2
+        return 2 # coverage too low
+    elif float(float(flag)/total) > 0.3:
+        print >> ofile, 1
+        return 1 # support mping insertion with gapped clipped reads
+    elif float(float(clipped)/total) > 0.3:
+        print >> ofile, 1
+        return 1 # support mping insertion with clipped reads
+    elif total > 2 and clipped < 1 and covered < 1 and flag < 1 and footprint < 1:
+        print >> ofile, 2 # no supporting reads for anything
+        return 2 # 
+    elif float(float(footprint)/total) > 0.3 and flag == 0:
+        print >> ofile, 0
+        return 0 # support mping excision, indel is possibly footprint of excision
+    elif float(float(covered)/total) > 0.3:
+        print >> ofile, 0
+        return 0 # support mping excision, many read cover the breapoint suggests precise excision
     else:
-        return 0
- 
+        print >> ofile, 3
+        return 3 # other case
 def excision(mPing_ancestor, mPing_rils, mPing_frq):
     mPing_excision = defaultdict(lambda : defaultdict(lambda : int()))
-    binmap = convert_MAP('../input/MPR.geno.bin.uniq')
-    transition = validmap(binmap)
-    for mping in mPing_ancestor.keys():
-        print mping
+    binmap = convert_MAP('../input/MPR.geno.bin')
+    #transition = validmap(binmap)
+    for mping in sorted(mPing_ancestor.keys()):
+        #print mping
         if not mPing_frq.has_key(mping) or mPing_frq[mping] < 0.05:
             continue
-            print 'not in rils'
-        print 'in rils'
-        for ril in mPing_rils.keys():
+            #print 'not in rils'
+        #print 'in rils'
+        for ril in sorted(mPing_rils.keys()):
             #print 'TT',ril,len(binmap[ril].keys())
             if not binmap.has_key('GN%s' %(ril)):
                 continue
-            genotype = genotyping(ril, mping, binmap, transition)
+            genotype = genotyping(ril, mping, binmap)
             bam = '/rhome/cjinfeng/BigData/00.RD/RILs/QTL_pipe/input/fastq/RILs_ALL_bam/GN%s.bam' %(ril)
             flag = 2
-            #print mping, ril, genotype
+            #print 'Check:', mping, ril, genotype
             #if mping == 'Chr1:1715117-1715119' and int(ril) == 10:
                 #print 'EX', mping, ril, genotype, mPing_rils[ril][mping], mPing_ancestor[mping]
             if (int(genotype) == 0 and int(mPing_ancestor[mping]) != 1): # ril has genotype of reference and mping has genotype of reference or both
@@ -285,6 +328,8 @@ def excision(mPing_ancestor, mPing_rils, mPing_frq):
                         flag = bamcheck(bam, mping)
                         if flag == 0: ## bam check showed no mping insertion in this ril
                             mPing_excision[mping][ril] = 1
+                        elif flag == 3:
+                            mPing_excision[mping][ril] = 2
                     #print mPing_excision[mping]
             elif (int(genotype) == 1 and int(mPing_ancestor[mping]) != 0): # ril has genotype of nonref and mping has genotype of nonref or both
                 #print 'S2', mPing_rils[ril].has_key(mping)
@@ -295,6 +340,8 @@ def excision(mPing_ancestor, mPing_rils, mPing_frq):
                         flag = bamcheck(bam, mping)
                         if flag == 0: ## bam check showed no mping insertion in this ril
                             mPing_excision[mping][ril] = 1
+                        elif flag == 3:
+                            mPing_excision[mping][ril] = 2
                     #print mPing_excision[mping]
     return mPing_excision
 
@@ -302,7 +349,7 @@ def preplot(frq, ancestor, excision):
     for m in excision.keys():
         print '>', m, len(excision[m].keys())
         for i in sorted(excision[m].keys()):
-            print i
+            print i, excision[m][i]
 
 def main():
     parser = argparse.ArgumentParser()
